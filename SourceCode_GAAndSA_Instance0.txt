@@ -1,0 +1,922 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <cmath>
+#include <random>
+#include <iomanip>
+#include <algorithm>
+#include <numeric>
+#include <ctime>
+#include <set>
+#include <unordered_set>
+#include <map>
+#include <vector>
+#include <string>
+#define _ITERATOR_DEBUG_LEVEL 2
+#include <chrono>
+
+using namespace std;
+
+// ---------- Structures ----------
+struct City {
+    int id;
+    double x, y;
+    int color;
+};
+
+struct Depot {
+    int id;
+    double x, y;
+};
+
+struct Salesperson {
+    int id = -1;
+    double x = 0.0, y = 0.0;
+    vector<int> color;
+    double velocity = 1.0;
+    int sourceDepot = 0;
+};
+
+// ---------- Global Data ----------
+vector<City> cities;
+vector<Depot> depots;
+vector<Salesperson> salespersons;
+map<string, map<string, double>> distance_matrix;
+const size_t POP_SIZE = 10;
+
+// ---------- Utilities ----------
+double compute_distance(double x1, double y1, double x2, double y2) {
+    return sqrt(pow(x1 - x2, 2) + pow(y1 - y2, 2));
+}
+
+// ---------- Loaders ----------
+void load_cities(const string& filename) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cerr << "Error opening file: " << filename << endl;
+        exit(1);
+    }
+    string line;
+    getline(file, line);
+    while (getline(file, line)) {
+        istringstream iss(line);
+        City c;
+        int dummy1, dummy2;
+        iss >> c.id >> c.x >> c.y >> dummy1 >> c.color >> dummy2;
+        cities.push_back(c);
+    }
+    cout << "Loaded " << cities.size() << " cities." << endl;
+}
+
+void load_depots(const string& filename) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cerr << "Error opening file: " << filename << endl;
+        exit(1);
+    }
+    string line;
+    getline(file, line);
+    size_t idx = 0;
+    while (getline(file, line)) {
+        istringstream iss(line);
+        Depot d;
+        int dummy;
+        iss >> dummy >> d.x >> d.y;
+        d.id = static_cast<int>(idx++);
+        depots.push_back(d);
+    }
+    cout << "Loaded " << depots.size() << " depots." << endl;
+}
+
+void load_salespersons(const string& filename) {
+    ifstream file(filename);
+    if (!file.is_open()) {
+        cerr << "Error opening file: " << filename << endl;
+        exit(1);
+    }
+    string line;
+    getline(file, line);
+    while (getline(file, line)) {
+        istringstream iss(line);
+        Salesperson sp;
+        string temp;
+        iss >> sp.id >> sp.x >> sp.y;
+        while (iss >> temp) {
+            if (temp.find('.') != string::npos) break;
+            sp.color.push_back(stoi(temp));
+        }
+        sp.velocity = stod(temp);
+        iss >> sp.sourceDepot;
+        if (sp.sourceDepot >= static_cast<int>(depots.size()))
+            sp.sourceDepot = rand() % depots.size();
+        salespersons.push_back(sp);
+    }
+    cout << "Loaded " << salespersons.size() << " salespersons." << endl;
+}
+
+// ---------- Distance Matrix ----------
+void compute_distance_matrix() {
+    vector<pair<string, pair<double, double>>> points;
+    for (auto& city : cities)
+        points.push_back({ to_string(city.id), {city.x, city.y} });
+    for (auto& depot : depots)
+        points.push_back({ "Depot_" + to_string(depot.id), {depot.x, depot.y} });
+
+    for (auto& from : points) {
+        for (auto& to : points) {
+            distance_matrix[from.first][to.first] = compute_distance(
+                from.second.first, from.second.second,
+                to.second.first, to.second.second
+            );
+        }
+    }
+    cout << "Distance matrix computed for " << points.size() << " points." << endl;
+}
+
+// ---------- Initial Population ----------
+vector<map<int, vector<string>>> generate_initial_population() {
+    unordered_map<int, int> city_color_map;
+    for (auto& c : cities) city_color_map[c.id] = c.color;
+    map<int, vector<int>> sp_color_map;
+    for (auto& sp : salespersons) sp_color_map[sp.id] = sp.color;
+
+    vector<map<int, vector<string>>> population;
+    vector<int> city_ids;
+    for (auto& c : cities) city_ids.push_back(c.id);
+
+    for (size_t p = 0; p < POP_SIZE; ++p) {
+        random_shuffle(city_ids.begin(), city_ids.end());
+        map<int, vector<string>> chromosome;
+        for (auto& sp : salespersons) chromosome[sp.id] = {};
+        for (int city_id : city_ids) {
+            int color = city_color_map[city_id];
+            vector<int> valid_sps;
+            for (auto& sp : sp_color_map) {
+                if (find(sp.second.begin(), sp.second.end(), color) != sp.second.end())
+                    valid_sps.push_back(sp.first);
+            }
+            int chosen_sp;
+            if (!valid_sps.empty())
+                chosen_sp = valid_sps[rand() % valid_sps.size()];
+            else {
+                vector<int> all_sps;
+                for (auto& sp : sp_color_map) all_sps.push_back(sp.first);
+                chosen_sp = all_sps[rand() % all_sps.size()];
+            }
+            chromosome[chosen_sp].push_back(to_string(city_id));
+        }
+        population.push_back(chromosome);
+    }
+    cout << "Generated " << population.size() << " chromosomes." << endl;
+    return population;
+}
+
+
+double evaluate_chromosome_cost(const map<int, vector<string>>& chromosome, bool debug = false) {
+    double total_cost = 0.0;
+    unordered_map<string, int> city_visited_by;  // track who visited each city
+    map<int, double> cost_per_salesperson;
+
+    for (map<int, vector<string>>::const_iterator it = chromosome.begin(); it != chromosome.end(); ++it) {
+        int sp_id = it->first;
+        const vector<string>& route = it->second;
+
+        if (sp_id < 0 || sp_id >= (int)salespersons.size()) {
+            if (debug) cerr << "Invalid salesperson ID: " << sp_id << endl;
+            continue;
+        }
+
+        if (route.empty()) {
+            if (debug) cerr << "Empty route for Salesperson " << sp_id << endl;
+            continue;
+        }
+
+        int depot_index = salespersons[sp_id].sourceDepot;
+        string depot_name = "Depot_" + to_string(depot_index);
+
+        if (distance_matrix.count(depot_name) == 0) {
+            if (debug) cerr << "Missing depot: " << depot_name << endl;
+            continue;
+        }
+
+        if (distance_matrix[depot_name].count(route[0]) == 0) {
+            if (debug) cerr << "Missing leg from depot to first city: " << depot_name << " → " << route[0] << endl;
+            continue;
+        }
+
+        double route_cost = 0.0;
+        route_cost += distance_matrix[depot_name][route[0]];
+
+        for (size_t i = 0; i + 1 < route.size(); ++i) {
+            string from = route[i];
+            string to = route[i + 1];
+
+            // check for duplicate visits
+            if (city_visited_by.count(from)) {
+                if (debug) cerr << "City " << from << " visited by SP " << sp_id
+                    << " but already visited by SP " << city_visited_by[from] << endl;
+                return DBL_MAX;
+            }
+            city_visited_by[from] = sp_id;
+
+            if (distance_matrix.count(from) == 0 || distance_matrix[from].count(to) == 0) {
+                if (debug) cerr << "Missing leg: " << from << " → " << to << " for SP " << sp_id << endl;
+                continue;
+            }
+
+            route_cost += distance_matrix[from][to];
+        }
+
+        // Final city
+        if (!route.empty()) {
+            string last = route.back();
+            if (city_visited_by.count(last)) {
+                if (debug) cerr << "City " << last << " visited twice. SP " << sp_id
+                    << " and SP " << city_visited_by[last] << endl;
+                return DBL_MAX;
+            }
+            city_visited_by[last] = sp_id;
+
+            if (distance_matrix.count(last) && distance_matrix[last].count(depot_name)) {
+                route_cost += distance_matrix[last][depot_name];
+            }
+            else {
+                if (debug) cerr << "Missing return leg: " << last << " → " << depot_name << endl;
+            }
+        }
+
+        cost_per_salesperson[sp_id] = route_cost;
+        total_cost += route_cost;
+    }
+
+    // Check if all cities are visited exactly once
+    if (city_visited_by.size() != cities.size()) {
+        if (debug) {
+            cerr << "Not all cities visited or multiple visits detected. Visited: "
+                << city_visited_by.size() << " / Expected: " << cities.size() << endl;
+        }
+        return DBL_MAX;
+    }
+
+    if (debug) {
+        cout << "\nCost per Salesperson:\n";
+        for (map<int, double>::iterator it = cost_per_salesperson.begin(); it != cost_per_salesperson.end(); ++it) {
+            cout << "  Salesperson " << it->first << ": " << fixed << setprecision(2) << it->second << endl;
+        }
+    }
+
+    return total_cost;
+}
+
+
+
+void normalize_coordinates() {
+    double min_x = DBL_MAX, max_x = -DBL_MAX;
+    double min_y = DBL_MAX, max_y = -DBL_MAX;
+
+    // Get bounds from all cities and depots
+    for (const auto& c : cities) {
+        min_x = min(min_x, c.x);
+        max_x = max(max_x, c.x);
+        min_y = min(min_y, c.y);
+        max_y = max(max_y, c.y);
+    }
+    for (const auto& d : depots) {
+        min_x = min(min_x, d.x);
+        max_x = max(max_x, d.x);
+        min_y = min(min_y, d.y);
+        max_y = max(max_y, d.y);
+    }
+
+    double range_x = max_x - min_x;
+    double range_y = max_y - min_y;
+
+    for (auto& c : cities) {
+        c.x = (c.x - min_x) / range_x * 100.0;
+        c.y = (c.y - min_y) / range_y * 100.0;
+    }
+    for (auto& d : depots) {
+        d.x = (d.x - min_x) / range_x * 100.0;
+        d.y = (d.y - min_y) / range_y * 100.0;
+    }
+
+    for (auto& sp : salespersons) {
+        sp.x = (sp.x - min_x) / range_x * 100.0;
+        sp.y = (sp.y - min_y) / range_y * 100.0;
+    }
+
+    cout << "Coordinates normalized to range [0, 100]." << endl;
+}
+
+
+
+
+
+// ---------- Tournament Selection ----------
+vector<map<int, vector<string>>> tournament_selection(
+    const vector<map<int, vector<string>>>& population,
+    const vector<double>& fitnesses, int k = 3
+) {
+    vector<map<int, vector<string>>> selected;
+    for (size_t i = 0; i < population.size(); ++i) {
+        vector<size_t> indices(population.size());
+        iota(indices.begin(), indices.end(), 0);
+        random_shuffle(indices.begin(), indices.end());
+        size_t best_idx = indices[0];
+        double best_fit = fitnesses[best_idx];
+        for (int j = 1; j < k; ++j) {
+            size_t idx = indices[j];
+            if (fitnesses[idx] < best_fit) {
+                best_fit = fitnesses[idx];
+                best_idx = idx;
+            }
+        }
+        selected.push_back(population[best_idx]);
+    }
+    return selected;
+}
+
+// ---------- Roulette Selection ----------
+vector<map<int, vector<string>>> roulette_selection(
+    const vector<map<int, vector<string>>>& population,
+    const vector<double>& fitnesses
+) {
+    double max_fit = *max_element(fitnesses.begin(), fitnesses.end());
+    vector<double> inverted;
+    for (double f : fitnesses)
+        inverted.push_back(max_fit - f + 1e-6);
+    double total = accumulate(inverted.begin(), inverted.end(), 0.0);
+    vector<double> probs;
+    for (double inv : inverted)
+        probs.push_back(inv / total);
+
+    vector<map<int, vector<string>>> selected;
+    for (size_t i = 0; i < population.size(); ++i) {
+        double r = (double)rand() / RAND_MAX;
+        double accum = 0;
+        for (size_t j = 0; j < probs.size(); ++j) {
+            accum += probs[j];
+            if (r <= accum) {
+                selected.push_back(population[j]);
+                break;
+            }
+        }
+    }
+    return selected;
+}
+
+// ---------- Rank Selection ----------
+vector<map<int, vector<string>>> rank_selection(
+    const vector<map<int, vector<string>>>& population,
+    const vector<double>& fitnesses
+) {
+    vector<size_t> indices(population.size());
+    iota(indices.begin(), indices.end(), 0);
+    sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+        return fitnesses[a] < fitnesses[b];
+        });
+
+    vector<int> ranks(population.size());
+    for (size_t i = 0; i < ranks.size(); ++i)
+        ranks[indices[i]] = static_cast<int>(population.size() - i);
+
+    int total_rank = accumulate(ranks.begin(), ranks.end(), 0);
+    vector<double> probs;
+    for (int r : ranks)
+        probs.push_back((double)r / total_rank);
+
+    vector<map<int, vector<string>>> selected;
+    for (size_t i = 0; i < population.size(); ++i) {
+        double r = (double)rand() / RAND_MAX;
+        double accum = 0;
+        for (size_t j = 0; j < probs.size(); ++j) {
+            accum += probs[j];
+            if (r <= accum) {
+                selected.push_back(population[j]);
+                break;
+            }
+        }
+    }
+    return selected;
+}
+
+
+// ---------- PMX Crossover ----------
+pair<map<int, vector<string>>, map<int, vector<string>>> pmx_crossover(
+    const map<int, vector<string>>& p1, const map<int, vector<string>>& p2) {
+
+    auto pmx_route = [](const vector<string>& r1, const vector<string>& r2) {
+        size_t size = r1.size();
+        if (size != r2.size()) return r1;
+
+        size_t p1 = rand() % size;
+        size_t p2 = rand() % size;
+        if (p1 > p2) swap(p1, p2);
+
+        vector<string> child(size, "-1");
+        for (size_t i = p1; i < p2; ++i)
+            child[i] = r1[i];
+
+        for (size_t i = p1; i < p2; ++i) {
+            string val = r2[i];
+            if (find(child.begin(), child.end(), val) != child.end()) continue;
+            size_t idx = i;
+            while (child[idx] != "-1")
+                idx = find(r2.begin(), r2.end(), r1[idx]) - r2.begin();
+            child[idx] = val;
+        }
+
+        for (size_t i = 0; i < size; ++i)
+            if (child[i] == "-1") child[i] = r2[i];
+
+        return child;
+    };
+
+    map<int, vector<string>> o1, o2;
+    for (map<int, vector<string>>::const_iterator it = p1.begin(); it != p1.end(); ++it) {
+        int sp = it->first;
+        const vector<string>& r1 = it->second;
+        const vector<string>& r2 = p2.at(sp);
+
+        if (r1.size() != r2.size()) {
+            o1[sp] = r1;
+            o2[sp] = r2;
+        }
+        else {
+            o1[sp] = pmx_route(r1, r2);
+            o2[sp] = pmx_route(r2, r1);
+        }
+    }
+
+    return make_pair(o1, o2);
+}
+
+
+pair<map<int, vector<string>>, map<int, vector<string>>> pos_crossover(
+    const map<int, vector<string>>& p1, const map<int, vector<string>>& p2) {
+
+    auto pos_route = [](const vector<string>& r1, const vector<string>& r2) {
+        size_t size = r1.size();
+        if (size < 2 || r1.size() != r2.size()) return r1;
+
+        size_t cut1 = rand() % size;
+        size_t cut2 = rand() % size;
+        if (cut1 > cut2) swap(cut1, cut2);
+
+        vector<string> child(size, "");
+        for (size_t i = cut1; i <= cut2; ++i)
+            child[i] = r1[i];
+
+        vector<string> fill;
+        for (size_t i = 0; i < size; ++i) {
+            if (find(child.begin(), child.end(), r2[i]) == child.end()) {
+                fill.push_back(r2[i]);
+            }
+        }
+
+        size_t idx = 0;
+        for (size_t i = 0; i < size; ++i) {
+            if (child[i].empty()) {
+                child[i] = (idx < fill.size()) ? fill[idx++] : "-1";
+            }
+        }
+
+        return child;
+    };
+
+    map<int, vector<string>> o1, o2;
+    for (map<int, vector<string>>::const_iterator it = p1.begin(); it != p1.end(); ++it) {
+        int sp = it->first;
+        if (p2.find(sp) == p2.end()) {
+            cerr << "⚠ POS: p2 missing SP " << sp << endl;
+            continue;
+        }
+
+        const vector<string>& r1 = it->second;
+        const vector<string>& r2 = p2.at(sp);
+
+        o1[sp] = pos_route(r1, r2);
+        o2[sp] = pos_route(r2, r1);
+    }
+
+    return make_pair(o1, o2);
+}
+
+
+
+
+pair<map<int, vector<string>>, map<int, vector<string>>> ox_crossover(
+    const map<int, vector<string>>& p1, const map<int, vector<string>>& p2) {
+
+    auto ox_route = [](const vector<string>& r1, const vector<string>& r2) {
+        size_t size = r1.size();
+        if (size < 2 || r1.size() != r2.size()) return r1;
+
+        size_t cut1 = rand() % size;
+        size_t cut2 = rand() % size;
+        if (cut1 > cut2) swap(cut1, cut2);
+
+        vector<string> middle(r1.begin() + cut1, r1.begin() + cut2);
+        vector<string> remaining;
+        for (size_t i = 0; i < size; ++i) {
+            if (find(middle.begin(), middle.end(), r2[i]) == middle.end()) {
+                remaining.push_back(r2[i]);
+            }
+        }
+
+        vector<string> child;
+        child.insert(child.end(), remaining.begin(), remaining.begin() + cut1);
+        child.insert(child.end(), middle.begin(), middle.end());
+        child.insert(child.end(), remaining.begin() + cut1, remaining.end());
+
+        return child;
+    };
+
+    map<int, vector<string>> o1, o2;
+    for (map<int, vector<string>>::const_iterator it = p1.begin(); it != p1.end(); ++it) {
+        int sp = it->first;
+        if (p2.find(sp) == p2.end()) {
+            cerr << "⚠ OX: p2 missing SP " << sp << endl;
+            continue;
+        }
+
+        const vector<string>& r1 = it->second;
+        const vector<string>& r2 = p2.at(sp);
+
+        o1[sp] = ox_route(r1, r2);
+        o2[sp] = ox_route(r2, r1);
+    }
+
+    return make_pair(o1, o2);
+}
+
+
+
+
+// ---------- Swap Mutation ----------
+map<int, vector<string>> swap_mutation(const map<int, vector<string>>& chromo, double rate = 0.2) {
+    map<int, vector<string>> mutated;
+    for (auto& kv : chromo) {
+        const int sp = kv.first;
+        vector<string> route = kv.second;
+
+        if (route.empty()) {
+            cerr << "Empty route before swap mutation for Salesperson " << sp << endl;
+            mutated[sp] = route;
+            continue;
+        }
+
+        if (route.size() > 1 && ((double)rand() / RAND_MAX) < rate) {
+            size_t i = rand() % route.size();
+            size_t j = rand() % route.size();
+            if (i != j) {
+                swap(route[i], route[j]);
+            }
+        }
+        mutated[sp] = route;
+    }
+    return mutated;
+}
+
+
+
+
+// ---------- Inversion Mutation ----------
+map<int, vector<string>> inversion_mutation(const map<int, vector<string>>& chromo, double rate = 0.1) {
+    map<int, vector<string>> mutated;
+    for (auto& kv : chromo) {
+        const int sp = kv.first;
+        vector<string> route = kv.second;
+
+        if (route.empty()) {
+            cerr << "Empty route before inversion mutation for Salesperson " << sp << endl;
+            mutated[sp] = route;
+            continue;
+        }
+
+        if (route.size() > 2 && ((double)rand() / RAND_MAX) < rate) {
+            size_t i = rand() % route.size();
+            size_t j = rand() % route.size();
+            if (i > j) swap(i, j);
+            if (i < j) {
+                reverse(route.begin() + i, route.begin() + j + 1);
+            }
+        }
+        mutated[sp] = route;
+    }
+    return mutated;
+}
+
+
+
+map<int, vector<string>> precedence_repair(const map<int, vector<string>>& chromosome,
+    const vector<pair<string, string>>& precedence_list) {
+    map<int, vector<string>> repaired = chromosome;
+
+    for (size_t k = 0; k < precedence_list.size(); ++k) {
+        string before = precedence_list[k].first;
+        string after = precedence_list[k].second;
+
+        for (map<int, vector<string>>::iterator it = repaired.begin(); it != repaired.end(); ++it) {
+            vector<string>& route = it->second;
+
+            auto it_before = find(route.begin(), route.end(), before);
+            auto it_after = find(route.begin(), route.end(), after);
+
+            if (it_before != route.end() && it_after != route.end()) {
+                size_t i = distance(route.begin(), it_before);
+                size_t j = distance(route.begin(), it_after);
+
+                if (i > j && i < route.size() && j < route.size()) {
+                    swap(route[i], route[j]);
+                }
+            }
+        }
+    }
+
+    return repaired;
+}
+
+
+map<int, vector<string>> apply_simulated_annealing(const map<int, vector<string>>& chromosome,
+    double T_start = 100.0, double T_end = 1.0,
+    double alpha = 0.95, int max_iter = 100) {
+    map<int, vector<string>> current = chromosome;
+    map<int, vector<string>> best = current;
+    double current_cost = evaluate_chromosome_cost(current);
+    double best_cost = current_cost;
+    double T = T_start;
+
+    while (T > T_end) {
+        for (int i = 0; i < max_iter; ++i) {
+            map<int, vector<string>> neighbor = swap_mutation(current);
+            if (neighbor.empty()) continue;
+
+            double neighbor_cost = evaluate_chromosome_cost(neighbor);
+            double delta = neighbor_cost - current_cost;
+
+            if (delta < 0 || ((double)rand() / RAND_MAX) < exp(-delta / T)) {
+                current = neighbor;
+                current_cost = neighbor_cost;
+                if (current_cost < best_cost) {
+                    best = current;
+                    best_cost = current_cost;
+                }
+            }
+        }
+        T *= alpha;
+    }
+
+    return best;
+}
+
+
+vector<map<int, vector<string>>> generational_update(const vector<map<int, vector<string>>>& offspring) {
+    return offspring;
+}
+
+vector<map<int, vector<string>>> elitism_update(const vector<map<int, vector<string>>>& population,
+    const vector<map<int, vector<string>>>& offspring,
+    const vector<double>& fitnesses,
+    int n_elite = 2) {
+    vector<size_t> indices(population.size());
+    iota(indices.begin(), indices.end(), 0);
+
+    sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+        return fitnesses[a] < fitnesses[b];
+        });
+
+    vector<map<int, vector<string>>> elite;
+    for (int i = 0; i < n_elite; ++i)
+        elite.push_back(population[indices[i]]);
+
+    vector<map<int, vector<string>>> rest = offspring;
+    while (elite.size() + rest.size() > population.size())
+        rest.pop_back();
+
+    elite.insert(elite.end(), rest.begin(), rest.end());
+    return elite;
+}
+
+pair<vector<map<int, vector<string>>>, vector<int>> age_based_update(
+    const vector<map<int, vector<string>>>& population,
+    const vector<map<int, vector<string>>>& offspring,
+    const vector<int>& ages,
+    int max_age = 5) {
+
+    vector<map<int, vector<string>>> new_population;
+    vector<int> new_ages;
+
+    for (size_t i = 0; i < population.size(); ++i) {
+        if (ages[i] < max_age) {
+            new_population.push_back(population[i]);
+            new_ages.push_back(ages[i] + 1);
+        }
+    }
+
+    for (size_t i = 0; i < offspring.size() && new_population.size() < population.size(); ++i) {
+        new_population.push_back(offspring[i]);
+        new_ages.push_back(0);
+    }
+
+    while (new_population.size() < population.size()) {
+        new_population.push_back(offspring[rand() % offspring.size()]);
+        new_ages.push_back(0);
+    }
+
+    return make_pair(new_population, new_ages);
+}
+
+
+
+void genetic_algorithm_with_history(
+    const string& selection_method,
+    const string& crossover_method,
+    const vector<string>& mutation_methods,
+    const string& population_update,
+    const string& apply_sa_to,
+    const vector<pair<string, string>>& precedence_list,
+    size_t pop_size = 50,
+    size_t generations = 30
+) {
+    vector<map<int, vector<string>>> population = generate_initial_population();
+    vector<double> history;
+    map<int, vector<string>> best_chromo;
+    double best_cost = 1e9;
+
+    for (size_t gen = 0; gen < generations; ++gen) {
+        vector<double> fitnesses;
+        double best_cost_gen = DBL_MAX;
+        int best_index = -1;
+
+        // === Evaluate population
+        for (size_t i = 0; i < population.size(); ++i) {
+            double cost = evaluate_chromosome_cost(population[i]);  // no debug
+            fitnesses.push_back(cost);
+            if (cost < best_cost_gen) {
+                best_cost_gen = cost;
+                best_index = static_cast<int>(i);
+            }
+        }
+
+        // === Optional Debug: Only for best chromosome of this generation
+        if (best_index != -1) {
+            cout << "\n--- Debugging Best Chromosome of Generation " << gen + 1 << " ---" << endl;
+            evaluate_chromosome_cost(population[best_index], true);  // debug = true
+        }
+
+        // === Update global best
+        if (fitnesses[best_index] < best_cost) {
+            best_cost = fitnesses[best_index];
+            best_chromo = population[best_index];
+        }
+        history.push_back(best_cost);
+
+        // === Print generation summary
+        cout << "\nGeneration " << gen + 1 << " | Best Fitness: "
+            << fixed << setprecision(2) << fitnesses[best_index] << endl;
+        for (const auto& it : best_chromo) {
+            cout << "  Salesperson " << it.first << ": [";
+            for (size_t j = 0; j < it.second.size(); ++j)
+                cout << it.second[j] << (j + 1 < it.second.size() ? ", " : "");
+            cout << "]" << endl;
+        }
+        cout << "------------------------------------------" << endl;
+
+        // === Selection
+        vector<map<int, vector<string>>> selected;
+        if (selection_method == "tournament") {
+            selected = tournament_selection(population, fitnesses, 3);
+        }
+        else if (selection_method == "roulette") {
+            selected = roulette_selection(population, fitnesses);
+        }
+        else {
+            selected = rank_selection(population, fitnesses);
+        }
+
+        // === Crossover + Mutation
+        vector<map<int, vector<string>>> next_gen;
+        for (size_t i = 0; i + 1 < selected.size(); i += 2) {
+            const auto& p1 = selected[i];
+            const auto& p2 = selected[i + 1];
+
+            auto offspring = (crossover_method == "pmx") ? pmx_crossover(p1, p2)
+                : (crossover_method == "pos") ? pos_crossover(p1, p2)
+                : ox_crossover(p1, p2);
+
+            auto c1 = offspring.first;
+            auto c2 = offspring.second;
+
+            if (find(mutation_methods.begin(), mutation_methods.end(), "swap") != mutation_methods.end()) {
+                c1 = swap_mutation(c1);
+                c2 = swap_mutation(c2);
+            }
+            if (find(mutation_methods.begin(), mutation_methods.end(), "inversion") != mutation_methods.end()) {
+                c1 = inversion_mutation(c1);
+                c2 = inversion_mutation(c2);
+            }
+
+            c1 = precedence_repair(c1, precedence_list);
+            c2 = precedence_repair(c2, precedence_list);
+
+            if (apply_sa_to == "all") {
+                c1 = apply_simulated_annealing(c1);
+                c2 = apply_simulated_annealing(c2);
+            }
+            else if (apply_sa_to == "elite") {
+                double f1 = evaluate_chromosome_cost(c1);
+                double f2 = evaluate_chromosome_cost(c2);
+                if (f1 < f2)
+                    c1 = apply_simulated_annealing(c1);
+                else
+                    c2 = apply_simulated_annealing(c2);
+            }
+
+            next_gen.push_back(c1);
+            next_gen.push_back(c2);
+        }
+
+        // === Population update
+        if (population_update == "elitism") {
+            population = elitism_update(population, next_gen, fitnesses, 2);
+        }
+        else {
+            population = next_gen;
+        }
+    }
+
+    // === Final Output
+    cout << "\nBest distance after " << generations << " generations: "
+        << fixed << setprecision(2) << best_cost << endl;
+
+    cout << "--- FINAL_CHROMOSOME_START ---" << endl;
+    for (const auto& sp : best_chromo) {
+        cout << sp.first << ":";
+        for (const auto& city : sp.second) cout << city << " ";
+        cout << endl;
+    }
+    cout << "--- FINAL_CHROMOSOME_END ---" << endl;
+
+    // === Write to file directly inside the function
+    string filepath = "C:\\Users\\User\\Desktop\\Project1\\best_chromosome_Instance0.txt";
+    ofstream outfile(filepath);
+    if (!outfile.is_open()) {
+        cerr << "Error opening file: " << filepath << endl;
+        return;
+    }
+
+    outfile << "--- FINAL_CHROMOSOME_START ---\n";
+    for (const auto& sp : best_chromo) {
+        outfile << sp.first << ":";
+        for (const auto& city : sp.second) {
+            outfile << city << " ";
+        }
+        outfile << "\n";
+    }
+    outfile << "--- FINAL_CHROMOSOME_END ---\n";
+    outfile.close();
+    cout << "Final chromosome saved to: " << filepath << endl;
+}
+
+
+
+
+
+int main() {
+    srand(static_cast<unsigned int>(time(0)));
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    load_cities("C:\\Users\\User\\Desktop\\Project1\\Cities_0.txt");
+    load_depots("C:\\Users\\User\\Desktop\\Project1\\Depots_0.txt");
+    load_salespersons("C:\\Users\\User\\Desktop\\Project1\\Salespersons_0.txt");
+    normalize_coordinates();
+    compute_distance_matrix();
+
+    vector<pair<string, string>> precedence_list;
+    precedence_list.push_back(make_pair("3", "9"));
+
+    genetic_algorithm_with_history(
+        "rank",         // selection method
+        "pos",          // crossover method
+        { "swap", "inversion" },  // mutation methods
+        "elitism",      // population update
+        "elite",        // simulated annealing
+        precedence_list,
+        50,             // population size
+        30              // generations
+    );
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end_time - start_time;
+
+    double total_seconds = duration.count();
+    int minutes = static_cast<int>(total_seconds) / 60;
+    double seconds = total_seconds - (minutes * 60);
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "\nTotal runtime: " << minutes << " minutes and " << seconds << " seconds" << std::endl;
+
+    return 0;
+
+}
